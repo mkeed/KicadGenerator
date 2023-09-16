@@ -35,11 +35,13 @@ test {
         ,
         .tokens = &.{ .open, .{ .token = "pin" }, .{ .token = "input" }, .{ .token = "line" }, .open, .{ .token = "at" }, .{ .token = "-12.7" }, .{ .token = "-2.54" }, .{ .token = "0" }, .close, .open, .{ .token = "length" }, .{ .token = "5.08" }, .close, .open, .{ .token = "name" }, .{ .token = "D7" }, .open, .{ .token = "effects" }, .open, .{ .token = "font" }, .open, .{ .token = "size" }, .{ .token = "1.27" }, .{ .token = "1.27" }, .close, .close, .close, .close, .open, .{ .token = "number" }, .{ .token = "10" }, .open, .{ .token = "effects" }, .open, .{ .token = "font" }, .open, .{ .token = "size" }, .{ .token = "1.27" }, .{ .token = "1.27" }, .close, .close, .close, .close, .close },
     }};
-    //const alloc = std.testing.allocator;
+    const alloc = std.testing.allocator;
 
     for (testCases) |tc| {
         var iter = TokenIterator{ .text = tc.raw };
         var count: usize = 0;
+        var value = try parseSexp(tc.raw, alloc);
+        defer value.deinit();
         while (try iter.next()) |t| {
             defer count += 1;
             errdefer std.log.err("idx[{}] expected:[{}] got:[{}]", .{ count, tc.tokens[count], t });
@@ -48,21 +50,84 @@ test {
     }
 }
 
-pub fn parseSexp(text: []const u8, alloc: std.mem.Allocator) !Value {
-    var iter = TokenIterator{ .text = text };
-    var value = Value.init(alloc);
-    var cur = &value;
-    _ = cur;
+pub const ValueMap = struct {
+    items: std.ArrayList(Node),
+    alloc: std.mem.Allocator,
+    pub const NodeIdx = usize;
+    pub const Node = struct {
+        name: []const u8,
+        parent: ?NodeIdx,
+        child: std.ArrayList(NodeIdx),
+        pub fn init(alloc: std.mem.Allocator, name: []const u8, parent: ?NodeIdx) Node {
+            return .{
+                .name = name,
+                .parent = parent,
+                .child = std.ArrayList(NodeIdx).init(alloc),
+            };
+        }
+        pub fn deinit(self: Node) void {
+            self.child.deinit();
+        }
+    };
+    pub fn init(alloc: std.mem.Allocator) ValueMap {
+        return .{
+            .items = std.ArrayList(Node).init(alloc),
+            .alloc = alloc,
+        };
+    }
+    pub fn deinit(self: ValueMap) void {
+        for (self.items.items) |i| {
+            i.deinit();
+        }
+        self.items.deinit();
+    }
+    pub fn addNode(self: *ValueMap, name: []const u8, parent: ?NodeIdx) !NodeIdx {
+        var n = Node.init(self.alloc, name, parent);
+        errdefer n.deinit();
+        const idx = self.items.items.len;
+        try self.items.append(n);
+        return idx;
+    }
+    pub fn format(self: ValueMap, _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        var idx: ?usize = 0;
 
-    var stack = std.ArrayList(usize).init(alloc);
-    defer stack.deinit();
+        while (idx) |i| {}
+    }
+};
+
+pub fn parseSexp(text: []const u8, alloc: std.mem.Allocator) !ValueMap {
+    var iter = TokenIterator{ .text = text };
+    var value = ValueMap.init(alloc);
+    errdefer value.deinit();
+    var cur = try value.addNode("", null);
+
     while (try iter.next()) |t| {
         switch (t) {
-            .open => {},
-            .close => {},
-            .token => {},
+            .open => {
+                switch (((try iter.peek()) orelse return error.UnexpetctedEnd)) {
+                    .open, .close => return error.ExpectedName,
+                    .token => |name| {
+                        _ = try iter.next();
+                        const idx = try value.addNode(name, cur);
+                        try value.items.items[cur].child.append(idx);
+                        cur = idx;
+                    },
+                }
+            },
+            .close => {
+                if (value.items.items[cur].parent) |p| {
+                    cur = p;
+                } else {
+                    return error.UnexpectedParen;
+                }
+            },
+            .token => |name| {
+                const idx = try value.addNode(name, cur);
+                try value.items.items[cur].child.append(idx);
+            },
         }
     }
+    return value;
 }
 
 const TokenIterator = struct {
@@ -100,6 +165,10 @@ const TokenIterator = struct {
     };
     text: []const u8,
     idx: usize = 0,
+    pub fn peek(self: TokenIterator) !?Token {
+        var tmp = self;
+        return tmp.next();
+    }
     pub fn next(self: *TokenIterator) !?Token {
         if (self.idx >= self.text.len) return null;
         self.skipWhitespace();
